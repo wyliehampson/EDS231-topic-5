@@ -1,0 +1,328 @@
+---
+title: 'EDS 231: Topic 5 Class Lab'
+author: "Wylie Hampson"
+date: "4/27/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr) #text analysis in R
+library(pdftools)
+library(lubridate) #working with date data
+library(tidyverse)
+library(tidytext)
+library(readr)
+library(quanteda)
+library(readtext) #quanteda subpackage for reading pdf
+library(quanteda.textstats)
+library(quanteda.textplots)
+library(ggplot2)
+library(forcats)
+library(stringr)
+library(quanteda.textplots)
+library(widyr)# pairwise correlations
+library(igraph) #network plots
+library(ggraph)
+
+```
+
+#import EPA EJ Data
+
+```{r pdf_import}
+setwd(here("dat"))
+files <- list.files(pattern = "pdf$")
+
+ej_reports <- lapply(files, pdf_text)
+
+ej_pdf <- readtext("*.pdf", docvarsfrom = "filenames", 
+                    docvarnames = c("type", "year"),
+                    sep = "_")
+
+#creating an initial corpus containing our data
+epa_corp <- corpus(x = ej_pdf, text_field = "text" )
+summary(epa_corp)
+
+#I'm adding some additional, context-specific stop words to stop word lexicon
+more_stops <-c("2015","2016", "2017", "2018", "2019", "2020", "www.epa.gov", "https")
+add_stops<- tibble(word = c(stop_words$word, more_stops)) 
+stop_vec <- as_vector(add_stops)
+
+setwd(here())
+```
+
+Now we'll create some different data objects that will set us up for the subsequent analyses
+
+```{r tidy}
+
+#convert to tidy format and apply my stop words
+raw_text <- tidy(epa_corp) %>% 
+  rename(holder = year) %>% 
+  rename(year = docvar3) %>% 
+  rename(docvar3 = holder)
+
+#Distribution of most frequent words across documents
+raw_words <- raw_text %>%
+  mutate(year = as.factor(year)) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(add_stops, by = 'word') %>%
+  count(year, word, sort = TRUE)
+
+#number of total words by document  
+total_words <- raw_words %>% 
+  group_by(year) %>% 
+  summarize(total = sum(n))
+
+report_words <- left_join(raw_words, total_words)
+ 
+par_tokens <- unnest_tokens(raw_text, output = paragraphs, input = text, token = "paragraphs")
+
+par_tokens <- par_tokens %>%
+ mutate(par_id = 1:n())
+
+par_words <- unnest_tokens(par_tokens, output = word, input = paragraphs, token = "words")
+
+```
+
+Let's see which words tend to occur close together in the text. This is a way to leverage word relationships (in this case, co-occurence in a single paragraph) to give us some understanding of the things discussed in the documents.
+
+```{r co-occur_paragraphs}
+word_pairs <- par_words %>% 
+  pairwise_count(word, par_id, sort = TRUE, upper = FALSE) %>%
+  anti_join(add_stops, by = c("item1" = "word")) %>%
+  anti_join(add_stops, by = c("item2" = "word"))
+```
+
+Now we can visualize
+
+```{r co-occur_plots}
+word_pairs %>%
+  filter(n >= 100) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "dodgerblue") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, 
+                 point.padding = unit(0.2, "lines")) +
+  theme_void()
+```
+
+Hmm, interesting, but maybe we further subset the word pairs to get a cleaner picture of the most common ones by raising the cutoff for number of occurrences (n).
+
+Pairs like "environmental" and "justice" are the most common co-occurring words, but that doesn't give us the full picture asthey're also the most common individual words. We can also look at correlation among words, which tells us how often they appear together relative to how often they appear separately.
+
+```{r corr_paragraphs}
+ 
+word_cors <- par_words %>%
+  add_count(par_id) %>%
+  filter(n >= 50) %>%
+  select(-n) %>%
+  pairwise_cor(word, par_id, sort = TRUE)
+
+just_cors <- word_cors %>%
+  filter(item1 == "justice")
+
+word_cors %>%
+  filter(item1 %in% c("environmental", "justice", "equity", "income")) %>%
+  group_by(item1) %>%
+  top_n(6) %>%
+  ungroup() %>%
+  mutate(item1 = as.factor(item1),
+         name = reorder_within(item2, correlation, item1)) %>%
+  ggplot(aes(y = name, x = correlation, fill = item1)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap( ~ item1, ncol = 2, scales = "free") +
+  scale_y_reordered() +
+  labs(
+    y = NULL,
+    x = NULL,
+    title = "Correlations with key words",
+    subtitle = "EPA EJ Reports"
+  )
+
+#let's zoom in on just one of our key terms
+justice_cors <- word_cors %>%
+  filter(item1 == "justice") %>%
+  mutate(n = 1:n())
+ 
+```
+
+Not surprisingly, the correlation between "environmental" and "justice" is by far the highest, which makes sense given the nature of these reports. How might we visualize these correlations to develop of sense of the context in which justice is discussed here?
+
+```{r corr_network}
+justice_cors  %>%
+  filter(n <= 50) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = correlation, edge_width = correlation), edge_colour = "cyan4") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, 
+                 point.padding = unit(0.2, "lines")) +
+  theme_void()
+```
+
+Now let's look at the tf-idf term we talked about. Remember, this statistic goes beyond simple frequency calculations within a document to control for overall commonality across documents
+
+```{r}
+report_tf_idf <- report_words %>%
+  bind_tf_idf(word, year, n) %>% 
+  select(-total) %>%
+  arrange(desc(tf_idf))
+
+report_tf_idf %>%
+  group_by(year) %>%
+  slice_max(tf_idf, n = 10) %>%
+  ungroup() %>%
+  filter(nchar(word) > 2)%>%
+  ggplot(aes(tf_idf, fct_reorder(word, tf_idf), fill = year)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~year, ncol = 2, scales = "free") +
+  labs(x = "tf-idf", y = NULL)
+```
+
+So that gives an idea which words are frequent and unique to certain documents.
+
+Now let's switch gears to quanteda for some additional word relationship tools. We'll also get into some ways to assess the similarity of documents.
+
+```{r quanteda_init}
+tokens <- tokens(epa_corp, remove_punct = TRUE)
+toks1<- tokens_select(tokens, min_nchar = 3)
+toks1 <- tokens_tolower(toks1)
+toks1 <- tokens_remove(toks1, pattern = (stop_vec))
+dfm <- dfm(toks1)
+
+#first the basic frequency stat
+tstat_freq <- textstat_frequency(dfm, n = 5, groups = year)
+head(tstat_freq, 10)
+
+```
+
+Another useful word relationship concept is that of the n-gram, which essentially means tokenizing at the multi-word level
+
+```{r convert_dfm}
+toks2 <- tokens_ngrams(toks1, n=2)
+dfm2 <- dfm(toks2)
+dfm2 <- dfm_remove(dfm2, pattern = c(stop_vec))
+freq_words2 <- textstat_frequency(dfm2, n=20)
+freq_words2$token <- rep("bigram", 20)
+#tokens1 <- tokens_select(tokens1,pattern = stopwords("en"), selection = "remove")
+```
+
+Now we can upgrade that by using all of the frequencies for each word in each document and calculating a chi-square to see which words occur significantly more or less within a particular target document
+
+```{r}
+keyness <- textstat_keyness(dfm2, target = 2)
+textplot_keyness(keyness)
+```
+
+And finally, we can run a hierarchical clustering algorithm to assess document similarity. This tends to be more informative when you are dealing with a larger number of documents, but we'll add it here for future reference.
+
+```{r hierarch_clust}
+dist <- as.dist(textstat_dist(dfm))
+clust <- hclust(dist)
+plot(clust, xlab = "Distance", ylab = NULL)
+```
+
+**Assignment**
+
+**1.  What are the most frequent trigrams in the dataset? How does this compare to the most frequent bigrams? Which n-gram seems more informative here, and why?**
+
+*To see the most frequent trigrams we do what we did with the bigrams above, but we switch to to 3 instead of 2. We'll look at the same document, the one from 2016.*
+
+```{r}
+toks3 <- tokens_ngrams(toks1, n=3)
+dfm3 <- dfm(toks3)
+dfm3 <- dfm_remove(dfm3, pattern = c(stop_vec))
+freq_words3 <- textstat_frequency(dfm3, n=20)
+freq_words3$token <- rep("trigram", 20)
+```
+
+```{r}
+keyness3 <- textstat_keyness(dfm3, target = 2)
+textplot_keyness(keyness3)
+```
+
+*Instead of plots though let's just look at the top bigrams vs trigrams.*
+
+```{r}
+keyness <- keyness[order(keyness$n_reference, decreasing = TRUE)]
+keyness3 <- keyness3[order(keyness3$n_reference, decreasing = TRUE)]
+
+head(keyness, 10)
+head(keyness3, 10)
+```
+
+*What we can see by comparing bigrams and trigrams is that with the trigrams it seems as though it just tags an extra word/phrase to the most common bigrams, so you end up with different types of environmental justice. This could be useful if you wanted to look at the different types of environmental justice that is being talked about, but overall I think that the bigrams are more useful because you can see all of the topics that are being talked about. But I suppose both bigrams and trigrams could be useful, trigrams just seem more specific.*
+
+**2.  Choose a new focal term to replace "justice" and recreate the correlation table and network (see corr_paragraphs and corr_network chunks). Explore some of the plotting parameters in the cor_network chunk to see if you can improve the clarity or amount of information your plot conveys. Make sure to use a different color for the ties!**
+
+*Instead of using the word "justice", let's try looking at the word "climate".*
+
+```{r corr_paragraphs}
+climate_cors <- word_cors %>%
+  filter(item1 == "cliamte")
+
+word_cors %>%
+  filter(item1 == "climate") %>%
+  group_by(item1) %>%
+  top_n(6) %>%
+  ungroup() %>%
+  mutate(item1 = as.factor(item1),
+         name = reorder_within(item2, correlation, item1)) %>%
+  ggplot(aes(y = name, x = correlation, fill = item1)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap( ~ item1, ncol = 2, scales = "free") +
+  scale_y_reordered() +
+  labs(
+    y = NULL,
+    x = NULL,
+    title = "Correlations with cliamte",
+    subtitle = "EPA EJ Reports"
+  )
+
+#let's zoom in on just one of our key terms
+climate_cors <- word_cors %>%
+  filter(item1 == "climate") %>%
+  mutate(n = 1:n())
+``` 
+
+*So above are the words that show up the most along with the word "cliamte". Makes sense that the most common word is the word "change". Now let's make a correlation network. In order to get more out of the plot I decided to only look at the 15 most correlated words instead of 50. I also made the dots slightly smaller and used a dark green color. As you can see, "change" has a significantly higher correlation than other words.*
+
+```{r corr_network}
+climate_cors  %>%
+  filter(n <= 15) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = correlation, edge_width = correlation), edge_colour = "darkgreen") +
+  geom_node_point(size = 3) +
+  geom_node_text(aes(label = name), repel = TRUE, 
+                 point.padding = unit(0.2, "lines")) +
+  theme_void()
+```
+
+**3.  Write a function that allows you to conduct a keyness analysis to compare two individual EPA reports (hint: that means target and reference need to both be individual reports). Run the function on 3 pairs of reports, generating 3 keyness plots.**
+
+```{r}
+toks3 <- tokens_ngrams(toks1, n=3)
+dfm3 <- dfm(toks3)
+dfm3 <- dfm_remove(dfm3, pattern = c(stop_vec))
+freq_words3 <- textstat_frequency(dfm3, n=20)
+freq_words3$token <- rep("trigram", 20)
+```
+
+```{r}
+keyness3 <- textstat_keyness(dfm3, target = 2)
+textplot_keyness(keyness3)
+```
+
+```{r}
+keyness_analysis <- function() {
+  
+  
+  
+}
+```
+
+
+
+4.  Select a word or multi-word term of interest and identify words related to it using windowing and keyness comparison. To do this you will create to objects: one containing all words occurring within a 10-word window of your term of interest, and the second object containing all other words. Then run a keyness comparison on these objects. Which one is the target, and which the reference? [Hint](https://tutorials.quanteda.io/advanced-operations/target-word-collocations/)

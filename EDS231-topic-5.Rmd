@@ -1,0 +1,207 @@
+---
+title: 'EDS 231: Topic 5'
+author: "Wylie Hampson"
+date: "4/29/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyr) #text analysis in R
+library(pdftools)
+library(lubridate) #working with date data
+library(tidyverse)
+library(tidytext)
+library(readr)
+library(quanteda)
+library(readtext) #quanteda subpackage for reading pdf
+library(quanteda.textstats)
+library(quanteda.textplots)
+library(ggplot2)
+library(forcats)
+library(stringr)
+library(quanteda.textplots)
+library(widyr)# pairwise correlations
+library(igraph) #network plots
+library(ggraph)
+library(here)
+```
+
+**For this assignment we are using 6 different EPA EJ documents to do text and sentiment analysis on. First, let's import the data:**
+
+```{r}
+setwd(here("dat"))
+files <- list.files(pattern = "pdf$")
+
+ej_reports <- lapply(files, pdf_text)
+
+ej_pdf <- readtext("*.pdf", docvarsfrom = "filenames", 
+                    docvarnames = c("type", "year"),
+                    sep = "_")
+
+#creating an initial corpus containing our data
+epa_corp <- corpus(x = ej_pdf, text_field = "text" )
+summary(epa_corp)
+
+setwd(here())
+```
+
+**Here we add some custom stop words to take out of the documents.**
+
+```{r}
+#I'm adding some additional, context-specific stop words to stop word lexicon
+more_stops <-c("2015","2016", "2017", "2018", "2019", "2020", "www.epa.gov", "https")
+add_stops<- tibble(word = c(stop_words$word, more_stops)) 
+stop_vec <- as_vector(add_stops)
+```
+
+**Here we organize the words into tidy format and count how many there are of each word.**
+
+```{r}
+#convert to tidy format and apply my stop words
+raw_text <- tidy(epa_corp)
+
+#Distribution of most frequent words across documents
+raw_words <- raw_text %>%
+  mutate(year = as.factor(year)) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(add_stops, by = 'word') %>%
+  count(year, word, sort = TRUE)
+
+#number of total words by document  
+total_words <- raw_words %>% 
+  group_by(year) %>% 
+  summarize(total = sum(n))
+
+report_words <- left_join(raw_words, total_words)
+ 
+par_tokens <- unnest_tokens(raw_text, output = paragraphs, input = text, token = "paragraphs")
+
+par_tokens <- par_tokens %>%
+ mutate(par_id = 1:n())
+
+par_words <- unnest_tokens(par_tokens, output = word, input = paragraphs, token = "words")
+```
+
+**Now let's look at common word pairs that show up in all of the documents.**
+
+```{r}
+word_pairs <- par_words %>% 
+  pairwise_count(word, par_id, sort = TRUE, upper = FALSE) %>%
+  anti_join(add_stops, by = c("item1" = "word")) %>%
+  anti_join(add_stops, by = c("item2" = "word"))
+```
+
+```{r}
+word_pairs %>%
+  filter(n >= 100) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "dodgerblue") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, 
+                 point.padding = unit(0.2, "lines")) +
+  theme_void()
+```
+
+**This shows 4 words, "environmental", "justice", "equity", and "income", and their highest correlated words that get paired with them.**
+
+```{r}
+word_cors <- par_words %>% 
+  add_count(par_id) %>% 
+  filter(n >= 50) %>% 
+  select(-n) %>%
+  pairwise_cor(word, par_id, sort = TRUE)
+
+just_cors <- word_cors %>% 
+  filter(item1 == "justice")
+
+  word_cors %>%
+  filter(item1 %in% c("environmental", "justice", "equity", "income"))%>%
+  group_by(item1) %>%
+  top_n(6) %>%
+  ungroup() %>%
+  mutate(item1 = as.factor(item1),
+  name = reorder_within(item2, correlation, item1)) %>%
+  ggplot(aes(y = name, x = correlation, fill = item1)) + 
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~item1, ncol = 2, scales = "free")+
+  scale_y_reordered() +
+  labs(y = NULL,
+         x = NULL,
+         title = "Correlations with key words",
+         subtitle = "EPA EJ Reports")
+```
+
+```{r}
+  #let's zoom in on just one of our key terms
+   justice_cors <- word_cors %>% 
+  filter(item1 == "justice") %>%
+   mutate(n = 1:n())
+```
+
+```{r}
+justice_cors  %>%
+  filter(n <= 50) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = correlation, edge_width = correlation), edge_colour = "cyan4") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, 
+                 point.padding = unit(0.2, "lines")) +
+  theme_void()
+```
+
+```{r}
+report_tf_idf <- report_words %>%
+  bind_tf_idf(word, year, n) %>%
+  select(-total) %>%
+  arrange(desc(tf_idf))
+
+report_tf_idf %>%
+  group_by(year) %>%
+  slice_max(tf_idf, n = 10) %>%
+  ungroup() %>%
+  filter(nchar(word) > 2)%>%
+  ggplot(aes(tf_idf, fct_reorder(word, tf_idf), fill = year)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~year, ncol = 2, scales = "free") +
+  labs(x = "tf-idf", y = NULL)
+```
+
+```{r}
+tokens <- tokens(epa_corp, remove_punct = TRUE)
+toks1<- tokens_select(tokens, min_nchar = 3)
+toks1 <- tokens_tolower(toks1)
+toks1 <- tokens_remove(toks1, pattern = (stop_vec))
+dfm <- dfm(toks1)
+
+#first the basic frequency stat
+tstat_freq <- textstat_frequency(dfm, n = 5, groups = year)
+head(tstat_freq, 10)
+```
+
+**Exploring n-grams to look at multiword tokens.**
+
+```{r}
+toks2 <- tokens_ngrams(toks1, n=2)
+dfm2 <- dfm(toks2)
+dfm2 <- dfm_remove(dfm2, pattern = c(stop_vec))
+freq_words2 <- textstat_frequency(dfm2, n=20)
+freq_words2$token <- rep("bigram", 20)
+#tokens1 <- tokens_select(tokens1,pattern = stopwords("en"), selection = "remove")
+```
+
+```{r}
+keyness <- textstat_keyness(dfm2, target = 2)
+textplot_keyness(keyness)
+```
+
+```{r}
+dist <- as.dist(textstat_dist(dfm))
+clust <- hclust(dist)
+plot(clust, xlab = "Distance", ylab = NULL)
+```
+
+

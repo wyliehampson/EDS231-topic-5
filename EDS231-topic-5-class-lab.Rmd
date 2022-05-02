@@ -24,7 +24,7 @@ library(quanteda.textplots)
 library(widyr)# pairwise correlations
 library(igraph) #network plots
 library(ggraph)
-
+library(here)
 ```
 
 #import EPA EJ Data
@@ -186,7 +186,7 @@ Now let's switch gears to quanteda for some additional word relationship tools. 
 
 ```{r quanteda_init}
 tokens <- tokens(epa_corp, remove_punct = TRUE)
-toks1<- tokens_select(tokens, min_nchar = 3)
+toks1 <- tokens_select(tokens, min_nchar = 3)
 toks1 <- tokens_tolower(toks1)
 toks1 <- tokens_remove(toks1, pattern = (stop_vec))
 dfm <- dfm(toks1)
@@ -316,13 +316,43 @@ textplot_keyness(keyness3)
 ```
 
 ```{r}
-keyness_analysis <- function() {
+keyness_analysis <- function(dfm, target) {
   
-  
+  keyness <- textstat_keyness(x = dfm, target = target)
+  textplot_keyness(keyness)
   
 }
 ```
 
+```{r}
+keyness_analysis(dfm2, 1)
+keyness_analysis(dfm2, 2)
+keyness_analysis(dfm3, 3)
+```
 
 
-4.  Select a word or multi-word term of interest and identify words related to it using windowing and keyness comparison. To do this you will create to objects: one containing all words occurring within a 10-word window of your term of interest, and the second object containing all other words. Then run a keyness comparison on these objects. Which one is the target, and which the reference? [Hint](https://tutorials.quanteda.io/advanced-operations/target-word-collocations/)
+**4.  Select a word or multi-word term of interest and identify words related to it using windowing and keyness comparison. To do this you will create to objects: one containing all words occurring within a 10-word window of your term of interest, and the second object containing all other words. Then run a keyness comparison on these objects. Which one is the target, and which the reference? [Hint](https://tutorials.quanteda.io/advanced-operations/target-word-collocations/)**
+
+*So to do this we will start with our tokens object from above which contains all of the single word tokens from each report, with stop words removed. The term of interest will be the same word that I used before which was "climate".*
+
+```{r}
+tokens <- tokens(epa_corp, remove_punct = TRUE, 
+                 remove_numbers = TRUE,
+                 remove_symbols = TRUE) # Remove the numbers and symbols as well.
+toks_inside <- tokens_keep(tokens, pattern = "climate", window = 10)
+toks_inside <- tokens_remove(toks_inside, pattern = "climate") # Remove the word "climate" itself.
+toks_outside <- tokens_remove(toks_inside, pattern = "climate", window = 10)
+```
+
+```{r}
+dfmat_inside <- dfm(toks_inside)
+dfmat_outside <- dfm(toks_outside)
+
+tstat_key_inside <- textstat_keyness(rbind(dfmat_inside, dfmat_outside), 
+                                     target = seq_len(ndoc(dfmat_inside)))
+head(tstat_key_inside, 50)
+```
+
+
+
+
